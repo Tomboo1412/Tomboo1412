@@ -39,7 +39,13 @@ TASK_IDENTIFY_PROMPT = (
 
 VALID_TASK_IDS = {'1', '2', '3', '4', '5', '6', '7', '8', '9'}
 
-SAVE_PATH = '/home/abot/demo/src/abot_vlm/temp2/vl_now.jpg'
+# 图像保存路径: 优先从 ROS 参数服务器获取，允许 launch 文件覆盖
+# 默认回退到原始路径以保持兼容性
+_DEFAULT_SAVE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    'temp2', 'vl_now.jpg',
+)
+SAVE_PATH = os.environ.get('VLM_SAVE_PATH', _DEFAULT_SAVE_PATH)
 
 
 # ------------------------------------------------------------------
@@ -174,10 +180,19 @@ def handle_task_identify(req):
 
 def main():
     rospy.init_node('identify_node', anonymous=True)
+
+    # 启动时检查 API Key
+    if not YI_KEY:
+        rospy.logwarn(
+            'ARK_API_KEY 环境变量未设置！识别服务将无法调用大模型 API。'
+            '请在启动前执行: export ARK_API_KEY="your_key_here"'
+        )
+
     rospy.set_param('/detect', 255)
     rospy.Subscriber('/usb_cam/image_raw', ROSImage, on_image)
     rospy.Service('task_identify', Trigger, handle_task_identify)
     rospy.loginfo('任务信息识别服务已启动 (task_identify)，等待调用...')
+    rospy.loginfo('图像保存路径: %s', SAVE_PATH)
     rospy.spin()
 
 

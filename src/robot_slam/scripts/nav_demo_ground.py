@@ -42,6 +42,14 @@ from std_srvs.srv import Trigger
 # ──────────────────────────────────────────────────────────────────
 CELL_SIZE  = 0.4   # m / 格
 GRID_COLS  = 9
+GRID_ROWS  = 9
+# 场地顶端 y 坐标 = GRID_ROWS 行格子顶端，单位 m
+# 推导: 行1的上边界 = GRID_ROWS * CELL_SIZE = 3.6m，
+#       行1格子中心 y = 3.6 - CELL_SIZE/2 = 3.4m
+#       任意格子 y   = GRID_ROWS*CELL_SIZE - row*CELL_SIZE + CELL_SIZE/2
+#                    = (GRID_ROWS + 0.5 - row) * CELL_SIZE
+#                    = 3.8 - row * 0.4   (当 GRID_ROWS=9, CELL_SIZE=0.4)
+_GRID_Y_OFFSET = (GRID_ROWS + 0.5) * CELL_SIZE   # = 3.8
 
 # 4 个任务信息图像观察点格子编号（顺序固定）
 OBSERVE_CELLS = [5, 45, 77, 37]
@@ -70,7 +78,7 @@ def cell_id_to_xy(cell_id):
     row = (cell_id - 1) // GRID_COLS + 1
     col = (cell_id - 1) %  GRID_COLS + 1
     x = col  * CELL_SIZE - CELL_SIZE / 2.0
-    y = 3.8  - row * CELL_SIZE
+    y = _GRID_Y_OFFSET - row * CELL_SIZE
     return (x, y)
 
 
@@ -204,16 +212,19 @@ class GroundNavigator:
         #   索引 0-3  : 观察点 (格子 5, 45, 77, 37)
         #   索引 4-12 : 任务点 (格子 31-51，task_id 1-9 对应 index 4-12)
         #   索引 13   : 终点   (格子 9)
-        raw_x   = rospy.get_param('~goalListX',
-                    '1.8,3.4,1.8,0.2,1.4,1.8,2.2,1.4,1.8,2.2,1.4,1.8,2.2,3.4')
-        raw_y   = rospy.get_param('~goalListY',
-                    '3.4,1.8,0.2,1.8,2.2,2.2,2.2,1.8,1.8,1.8,1.4,1.4,1.4,3.4')
-        raw_yaw = rospy.get_param('~goalListYaw',
-                    '0,0,0,0,0,0,0,0,0,0,0,0,0,0')
+        raw_x   = rospy.get_param('~goalListX',   None)
+        raw_y   = rospy.get_param('~goalListY',   None)
+        raw_yaw = rospy.get_param('~goalListYaw', None)
 
-        self.goal_x   = [float(v.strip()) for v in raw_x.split(',')]
-        self.goal_y   = [float(v.strip()) for v in raw_y.split(',')]
-        self.goal_yaw = [float(v.strip()) for v in raw_yaw.split(',')]
+        if raw_x is None or raw_y is None or raw_yaw is None:
+            rospy.logfatal(
+                'goalListX/Y/Yaw 参数未设置！请确认 multi_goal.launch 已正确传入参数。'
+            )
+            raise RuntimeError('Missing goalList params from launch file')
+
+        self.goal_x   = [float(v.strip()) for v in str(raw_x).split(',')]
+        self.goal_y   = [float(v.strip()) for v in str(raw_y).split(',')]
+        self.goal_yaw = [float(v.strip()) for v in str(raw_yaw).split(',')]
 
         # 验证列表长度一致
         n = len(self.goal_x)
