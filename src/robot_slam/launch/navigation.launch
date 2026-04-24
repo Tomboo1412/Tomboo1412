@@ -1,12 +1,22 @@
 <launch>
-  <param name="use_sim_time" value="false" />
+  <!-- 比赛场地导航总启动文件
+       依次启动: 地图服务 → Cartographer定位 → move_base → 地面赛主控程序
+  -->
+  <param name="use_sim_time" value="true" />
 
-  <arg name="map_name" default="my_lab.yaml" />
+  <!-- 默认使用比赛地图 (先建图再替换 craic_ground.pgm/yaml) -->
+  <arg name="map_name" default="craic_ground.yaml" />
 
-  <node name="map_server" pkg="map_server" type="map_server" args="$(find robot_slam)/maps/$(arg map_name)"/>
+  <!-- 静态地图 -->
+  <node name="map_server" pkg="map_server" type="map_server"
+        args="$(find robot_slam)/maps/$(arg map_name)"/>
 
-  <include file="$(find robot_slam)/launch/include/move_base.launch.xml" />
+  <!-- Cartographer 纯定位 (提供 map→odom TF) -->
+  <include file="$(find robot_slam)/launch/zoo_2Dlidar_localication.launch"/>
 
-  <include file="$(find robot_slam)/launch/include/amcl.launch.xml" />
-  
+  <!-- move_base 导航栈 -->
+  <include file="$(find robot_slam)/launch/include/move_base.launch.xml"/>
+
+  <!-- 地面赛主控程序 (状态机: 等待唤醒→识别→任务→终点) -->
+  <include file="$(find robot_slam)/launch/multi_goal.launch"/>
 </launch>

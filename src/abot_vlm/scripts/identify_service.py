@@ -1,175 +1,185 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-'''
-Copyright (c) [Zachary]
-本代码受版权法保护，未经授权禁止任何形式的复制、分发、修改等使用行为。
-Author:Zachary
-'''
-import rospy
-import cv2
-import numpy as np
-from PIL import Image, ImageFont, ImageDraw
-import time
-from sensor_msgs.msg import Image as ROSImage
-from std_srvs.srv import Trigger, TriggerResponse
-from API_KEY import *
+"""
+identify_service.py -- 任务信息图像识别服务
+
+服务名: task_identify  (std_srvs/Trigger)
+返回:
+  success=True  -> message = JSON, e.g. '{"task_id": 3}'
+  success=False -> message = JSON, e.g. '{"task_id": -1, "error": "..."}'
+
+task_id 合法范围: 1-9，对应黄色任务点格子:
+  1->31  2->32  3->33  4->40  5->41  6->42  7->49  8->50  9->51
+"""
+
 import json
-import openai
-from openai import OpenAI
+import time
 import base64
 import sys
+import os
+
+import cv2
+import numpy as np
+import rospy
+from sensor_msgs.msg import Image as ROSImage
+from std_srvs.srv import Trigger, TriggerResponse
+from openai import OpenAI
+
+# API Key -- 从环境变量读取，不要把 key 硬编码在代码中
+# 比赛前在运行终端执行: export ARK_API_KEY="your_key_here"
+YI_KEY = os.environ.get('ARK_API_KEY', '')
+
+# 任务信息识别提示词
+TASK_IDENTIFY_PROMPT = (
+    '这是比赛场地围栏内侧贴的任务信息图像。'
+    '图中标注了一个任务点编号，该编号是 1 到 9 中的某个整数。'
+    '请识别图像中的任务点编号，最后一行只输出该数字（仅数字，无任何其他字符）；'
+    '若无法识别，最后一行只输出"无"。'
+)
+
+VALID_TASK_IDS = {'1', '2', '3', '4', '5', '6', '7', '8', '9'}
+
+SAVE_PATH = '/home/abot/demo/src/abot_vlm/temp2/vl_now.jpg'
+
+
+# ------------------------------------------------------------------
+# 图像格式转换
+# ------------------------------------------------------------------
 
 def imgmsg_to_cv2(img_msg):
-    dtype = np.dtype("uint8")  # Hardcode to 8 bits...
+    dtype = np.dtype('uint8')
     dtype = dtype.newbyteorder('>' if img_msg.is_bigendian else '<')
-    image_opencv = np.ndarray(shape=(img_msg.height, img_msg.width, 3), dtype=dtype, buffer=img_msg.data)
-
-    # 如果消息和系统的字节序不同
+    image = np.ndarray(
+        shape=(img_msg.height, img_msg.width, 3),
+        dtype=dtype,
+        buffer=img_msg.data,
+    )
     if img_msg.is_bigendian == (sys.byteorder == 'little'):
-        image_opencv = image_opencv.byteswap().newbyteorder()
+        image = image.byteswap().newbyteorder()
+    if img_msg.encoding == 'rgb8':
+        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    elif img_msg.encoding == 'mono8':
+        image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    elif img_msg.encoding != 'bgr8':
+        rospy.logerr('Unsupported encoding: %s', img_msg.encoding)
+        return None
+    return image
 
-    # 转换编码格式
-    if img_msg.encoding == "rgb8":
-        image_opencv = cv2.cvtColor(image_opencv, cv2.COLOR_RGB2BGR)
-    elif img_msg.encoding == "mono8":
-        image_opencv = cv2.cvtColor(image_opencv, cv2.COLOR_GRAY2BGR)
-    elif img_msg.encoding != "bgr8":
-        rospy.logerr("Unsupported encoding: %s", img_msg.encoding)
+
+# ------------------------------------------------------------------
+# 图像订阅回调 -- 按需保存图像
+# ------------------------------------------------------------------
+
+def on_image(img_msg):
+    if rospy.get_param('/detect', 255) != 1:
+        return
+    img = imgmsg_to_cv2(img_msg)
+    if img is None:
+        return
+    save_dir = os.path.dirname(SAVE_PATH)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    cv2.imwrite(SAVE_PATH, img)
+    rospy.loginfo('图像已保存至 %s', SAVE_PATH)
+    rospy.set_param('/detect', 255)
+    cv2.waitKey(1)
+
+
+# ------------------------------------------------------------------
+# 视觉大模型 API 调用
+# ------------------------------------------------------------------
+
+def call_vision_api(img_path=SAVE_PATH, max_retry=3):
+    """
+    调用豆包视觉大模型识别任务点编号。
+    返回 '1'-'9' 或 None（失败）。
+    """
+    if not YI_KEY:
+        rospy.logerr('ARK_API_KEY 环境变量未设置，无法调用大模型 API')
         return None
 
-    return image_opencv
-
-def cv2_to_imgmsg(cv_image):
-    img_msg = ROSImage()
-    img_msg.height = cv_image.shape[0]
-    img_msg.width = cv_image.shape[1]
-    img_msg.encoding = "bgr8"
-    img_msg.is_bigendian = 0
-    img_msg.data = cv_image.tobytes()
-    img_msg.step = len(img_msg.data) // img_msg.height
-    return img_msg
-
-def top_view_shot(image_msg):
-    global detect
-    # 将ROS图像消息转换为OpenCV格式
-    img_bgr = imgmsg_to_cv2(image_msg)
-    # 从参数服务器获取detect的值
-    detect = rospy.get_param('/detect', 255)
-    
-    if detect == 1:
-        # 保存图像
-        save_path = '/home/abot/demo/src/abot_vlm/temp2/vl_now.jpg'
-        rospy.loginfo(f'保存至{save_path}')
-        cv2.imwrite(save_path, img_bgr)
-        # 重置detect
-        rospy.set_param('/detect', 255)
-        cv2.waitKey(1)
-
-        # 调用视觉大模型API
-        result = yi_vision_api()
-        rospy.loginfo(f'最终识别结果：{result}')
-
-def yi_vision_api(
-    # 强化Prompt：要求最后一行只输出答案数字
-    PROMPT='图中有一道数学题，答案是1-9中的一个阿拉伯数字。请先完整解题，最后一行只输出这个答案数字（仅数字，无任何其他字符）；若没有符合条件的数字，最后一行只输出“无”。',
-    img_path='/home/abot/demo/src/abot_vlm/temp2/vl_now.jpg',
-    max_retry=3  # 最大重试次数，避免无限循环
-):
-    '''
-    零一万物大模型开放平台，yi-vision视觉语言多模态大模型API
-    '''
-    # 初始化OpenAI客户端
     client = OpenAI(
         api_key=YI_KEY,
-        base_url="https://ark.cn-beijing.volces.com/api/v3"
+        base_url='https://ark.cn-beijing.volces.com/api/v3',
     )
-    
-    # 编码图片为base64
-    try:
-        with open(img_path, 'rb') as image_file:
-            image_base64 = base64.b64encode(image_file.read()).decode('utf-8')
-        image_url = f'data:image/jpeg;base64,{image_base64}'
-    except Exception as e:
-        rospy.logerr(f'读取图片失败：{e}')
-        return "无"
-    
-    # 有效结果（字符串类型）
-    valid_results = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "无"]
-    retry_count = 0  # 重试计数器
-    
-    while retry_count < max_retry:
-        try:
-            # 调用大模型API
-            response = client.chat.completions.create(
-                model="doubao-1-5-vision-pro-32k-250115",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": PROMPT},
-                            {"type": "image_url", "image_url": {"url": image_url}}
-                        ]
-                    }
-                ],
-                timeout=30  # 设置超时时间
-            )
-            
-            # 解析结果
-            result_str = response.choices[0].message.content.strip()
-            clean_result = "无"  # 默认值
-            
-            # 修复核心逻辑：1. 先按行分割取最后一行 2. 从后往前找最后一个有效数字
-            # 步骤1：按换行分割，取最后一行（优先匹配Prompt要求的“最后一行输出答案”）
-            lines = result_str.split('\n')
-            last_line = lines[-1].strip() if lines else ""
-            
-            # 步骤2：先检查最后一行是否是纯答案（数字/无）
-            if last_line in valid_results:
-                clean_result = last_line
-            else:
-                # 兜底：从整个返回文本的末尾往前找最后一个1-9的数字
-                for char in reversed(result_str):
-                    if char in ["1","2","3","4","5","6","7","8","9"]:
-                        clean_result = char
-                        break
-            
-            rospy.loginfo(f'大模型原始返回：\n{result_str}\n--- 清理后结果：{clean_result}')
-            
-            # 检查结果是否有效
-            if clean_result in valid_results:
-                return clean_result
-            else:
-                retry_count += 1
-                rospy.logwarn(f'结果不符合要求（{clean_result}），第{retry_count}次重试...')
-                time.sleep(1)
-        
-        except Exception as e:
-            retry_count += 1
-            rospy.logerr(f'调用大模型失败：{e}，第{retry_count}次重试...')
-            time.sleep(1)
-    
-    # 超过最大重试次数
-    rospy.logerr(f'超过最大重试次数（{max_retry}次），返回“无”')
-    return "无"
 
-def handle_fruit_detection(req):
-    # 调用视觉大模型API
-    result = yi_vision_api()
-    return TriggerResponse(success=True, message=result)
+    try:
+        with open(img_path, 'rb') as f:
+            image_b64 = base64.b64encode(f.read()).decode('utf-8')
+        image_url = 'data:image/jpeg;base64,' + image_b64
+    except Exception as exc:
+        rospy.logerr('读取图片失败: %s', exc)
+        return None
+
+    for attempt in range(1, max_retry + 1):
+        try:
+            response = client.chat.completions.create(
+                model='doubao-1-5-vision-pro-32k-250115',
+                messages=[{
+                    'role': 'user',
+                    'content': [
+                        {'type': 'text', 'text': TASK_IDENTIFY_PROMPT},
+                        {'type': 'image_url', 'image_url': {'url': image_url}},
+                    ],
+                }],
+                timeout=30,
+            )
+
+            raw = response.choices[0].message.content.strip()
+            rospy.loginfo('大模型原始返回:\n%s', raw)
+
+            lines = raw.split('\n')
+            last_line = lines[-1].strip() if lines else ''
+
+            if last_line in VALID_TASK_IDS:
+                return last_line
+
+            # 兜底: 从末尾往前找第一个合法数字
+            for ch in reversed(raw):
+                if ch in VALID_TASK_IDS:
+                    rospy.logwarn('兜底匹配到: %s', ch)
+                    return ch
+
+            rospy.logwarn('第 %d/%d 次: 未找到合法任务点编号，重试...', attempt, max_retry)
+
+        except Exception as exc:
+            rospy.logerr('API 调用失败 (第 %d/%d 次): %s', attempt, max_retry, exc)
+
+        time.sleep(1.5)
+
+    return None
+
+
+# ------------------------------------------------------------------
+# 服务处理函数
+# ------------------------------------------------------------------
+
+def handle_task_identify(req):
+    result_str = call_vision_api()
+
+    if result_str is not None and result_str in VALID_TASK_IDS:
+        payload = json.dumps({'task_id': int(result_str)})
+        rospy.loginfo('识别成功: %s', payload)
+        return TriggerResponse(success=True, message=payload)
+
+    error_msg = '识别失败或结果超出合法范围'
+    rospy.logwarn('%s', error_msg)
+    payload = json.dumps({'task_id': -1, 'error': error_msg})
+    return TriggerResponse(success=False, message=payload)
+
+
+# ------------------------------------------------------------------
+# 主函数
+# ------------------------------------------------------------------
 
 def main():
-    global detect
     rospy.init_node('identify_node', anonymous=True)
-    # 订阅图像话题
-    rospy.Subscriber('/usb_cam/image_raw', ROSImage, top_view_shot)
-    # 初始化参数服务器
     rospy.set_param('/detect', 255)
-    # 创建服务
-    s = rospy.Service('fruit_detection', Trigger, handle_fruit_detection)
-    
-    rospy.loginfo('视觉大模型模块启动成功！')
-    rospy.loginfo('准备识别...')
+    rospy.Subscriber('/usb_cam/image_raw', ROSImage, on_image)
+    rospy.Service('task_identify', Trigger, handle_task_identify)
+    rospy.loginfo('任务信息识别服务已启动 (task_identify)，等待调用...')
     rospy.spin()
+
 
 if __name__ == '__main__':
     try:
