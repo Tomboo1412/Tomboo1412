@@ -23,3 +23,4 @@ src/abot_vlm/temp2/
 *~
 .vscode/
 .idea/
+.env
